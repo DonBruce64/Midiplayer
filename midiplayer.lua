@@ -4,7 +4,7 @@ local shell=require('shell')
 local currentTime=os.clock()
 local speed=1
 
-print(string.format("Current free memory is %d%%",(computer.freeMemory()/computer.totalMemory()*100)))
+print(string.format("Current free memory is %dk (%d%%) ",computer.freeMemory()/1024, computer.freeMemory()/computer.totalMemory()*100))
 local args,options=shell.parse(...)
 if #args>1 then speed=tonumber(args[2]) end
 if #args==0 or speed==nil then
@@ -73,8 +73,7 @@ elseif fileFormat==2 then
   print("Asynchronous file format not suppported")
   return
 elseif fileFormat==1 then
-  print("Synchronous file format found.")
-  print(string.format("Found %d tracks.", numTracks))
+  print(string.format("Synchronous file format found with %d tracks.", numTracks))
 else
   print("Single track found.")
 end
@@ -85,16 +84,10 @@ local tpb=0
 if bit32.rshift(timeDivision,15)==0 then
   tpb=bit32.band(timeDivision,0x7FFF)
   tickLength=(spb / tpb)
-  print(string.format("Time division is in ticks per beat with %d ticks per beat", tpb))
-  print(string.format("Default tick length is %f seconds", tickLength))
 else
-  print("Time division is in frames per second")
   local fps=math.floor(bit32.extract(timeDivision,1,7))
   local tpf=bit32.rshift(timeDivision,8)
-  local tickLength=1/(tpf*fps); spb=nil
-  print(string.format("%d frames per second.", fps))
-  print(string.format("%d ticks per frame", tpf))
-  print(string.format("Tick length is %d seconds", tickLength))
+  tickLength=1/(tpf*fps); spb=nil
 end
 
 --Get track offsets
@@ -158,14 +151,12 @@ for i=1,numTracks do
       local test
       local eventType
       local eventTime=0
-      local bytePos=0
       
       repeat
         test=midiFile:read(1):byte()
-        eventTime=bit32.lshift(eventTime,bytePos)+bit32.extract(test,0,7)
-        bytePos=bytePos+7
-      until bit32.extract(test,7)==0      
-      
+        eventTime=bit32.lshift(eventTime,7)+bit32.extract(test,0,7)
+      until bit32.extract(test,7)==0
+	  
       currentTick=currentTick+eventTime
       eventType=midiFile:read(1)
       if bit32.extract(eventType:byte(),7)==0 then
@@ -223,10 +214,9 @@ for i=1,numTracks do
         elseif metaType==0x2F then--EOT
           midiFile:seek('cur',9); moreData=false
         elseif metaType==0x51 then --Set tempo
-          local oldspb=spb
           spb=hexToDec(midiFile:read(midiFile:read(1):byte()))/1000000
           tickLength=spb/tpb
-          if oldspb==0.5  then print(string.format("Tick length set to %f seconds by metadata in file", tickLength)) end
+          print(string.format("Tick length set to %f seconds by metadata in file", tickLength))
         elseif metaType==0x58 then --Time signature
           midiFile:seek('cur',1)
           local num=midiFile:read(1):byte()
@@ -254,11 +244,16 @@ for i=1,numTracks do
   end
 end
 midiFile:close()
+
 print("Track","Name","Instrument")
 for i=1,numTracks do
   if tracks[i].play then print(tracks[i].ID,tracks[i].name,tracks[i].Instrument) end
 end
+print('Notes ready in', os.clock()-currentTime)
+print(string.format("Current free memory is %dk (%d%%) ",computer.freeMemory()/1024, computer.freeMemory()/computer.totalMemory()*100))
 if options.i then return end
+print('Press any key to play.')
+io.read()
 
 local fireEvents={}
 local numEvents=0
@@ -271,48 +266,32 @@ fireEvents[numEvents+1]=fireEvents[numEvents]
 
 if instruments==1 then
   local instrument=component.getPrimary('iron_noteblock')
-  print('Notes ready in', os.clock()-currentTime)
-  print(string.format("Current free memory is %d%%",(computer.freeMemory()/computer.totalMemory()*100)))
-  io.read()
   for i=1,numEvents do
     for _,noteInfo in pairs(fireTicks[fireEvents[i]]) do
       instrument.playNote(noteInfo.instrument,noteInfo.note,noteInfo.volume)
     end
     os.sleep((fireEvents[i+1]-fireEvents[i])*tickLength-0.05)
   end
+  
 elseif instruments==-1 then
   local beeperEvents={}
   for i=1,numEvents do
     local beeps={}
     for _,noteInfo in pairs(fireTicks[fireEvents[i]]) do
-      if tonumber(noteInfo.duration)<100 then
-        beeps[math.max(math.min(noteInfo.frequency,2000),20)]=noteInfo.duration
-      end
+	  if tonumber(noteInfo.duration) < 200 then beeps[math.max(math.min(noteInfo.frequency,2000),20)]=tonumber(noteInfo.duration) end
     end
-    table.insert(beeperEvents,{beeps=beeps,delay=(fireEvents[i+1]-fireEvents[i])*tickLength-0.081*speed})
-    --.05 is good for light songs, 0.10 is good for heavy ones
+	table.insert(beeperEvents,{beeps=beeps,delay=(fireEvents[i+1]-fireEvents[i])*tickLength-0.081*speed}) --0.081 is an emperical constant
     fireTicks[fireEvents[i]]=nil
   end
   local beeper=component.getPrimary('beep')
-  print('Notes ready in', os.clock()-currentTime)
-  print(string.format("Current free memory is %d%%",(computer.freeMemory()/computer.totalMemory()*100)))
-  io.read()
   for _,beepInfo in ipairs(beeperEvents) do
     beeper.beep(beepInfo.beeps)
     os.sleep(beepInfo.delay)
   end
+  
 elseif instruments==0 then
-  print('Notes ready in', os.clock()-currentTime)
-  print(string.format("Current free memory is %d%%",(computer.freeMemory()/computer.totalMemory()*100)))
   for i=1,numEvents do
     computer.beep(fireTicks[fireEvents[i]][1].frequency,fireTicks[fireEvents[i]][1].duration)
     os.sleep((fireEvents[i+1]-fireEvents[i])*tickLength-fireTicks[fireEvents[i]][1].duration-0.05)
   end
 end
-
-
---Debug lines    
---print('on key is',eventType:sub(2,2)..noteInfo.frequency,'with val',currentTick)
---print(string.format('event type %02X, event delta time %d, at position %d, at tick %d',eventType,eventTime,midiFile:seek(),currentTick))
---print('freq',frequency,'on ID',eventType:sub(2,2)..noteInfo.frequency)
---print(string.format('found invalid event, switching from event %02X to event %s',eventType:byte(),previousEventType))
