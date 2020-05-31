@@ -1,6 +1,15 @@
+--This program parses and plays midi files.
+--Files may either be played directly after parsing, or can be saved
+--to specialized .mdp files for direct playback on machines running midiplayer_light.lua.
+--This prevents the need to have fast (expensive) computers to play back music.
+--Should you not want to use OpenOS, this program has two stand-alone companion programs.
+--midiplayer_convertwrapper.lua can run on EEPROMs and will convert songs to .mdp files.
+--midiplayer_light can also run on EEPROMs, and will read .mdp files.
+
 local component=require('component')
 local computer=require('computer')
 local shell=require('shell')
+local serialization=require('serialization')
 local currentTime=os.clock()
 local speed=1
 
@@ -8,13 +17,12 @@ print(string.format("Current free memory is %dk (%d%%) ",computer.freeMemory()/1
 local args,options=shell.parse(...)
 if #args>1 then speed=tonumber(args[2]) end
 if #args==0 or speed==nil then
-  print("Usage: midiplayer [-i] <filename> [speed] [track1[track2[...]]]")
+  print("Usage: midiplayer [-i] [-d] [-r] <filename> [speed] [track1[track2[...]]]")
   print("Speed is an optional multiplier, usually needed for really simple or complex songs; default=1")
   print("Track is a list of the specific tracks to play; speed multiplier must be given in this case")
   print(" -i: Print track info and exit")
-
-  --print(" -d: dump track info to file (mididump.mdp) for later use")
-  --print(" -r: read dump file instead of MIDI file")
+  print(" -d: Dump track info to file (beep cards only).")
+  print(" -r: Read dump file instead of MIDI file.")
   return
 end
 
@@ -25,11 +33,35 @@ if not midiFile then
 end
 local fileSize=midiFile:seek('end'); midiFile:seek('set')
 
+if options.r then --reading a beep file
+  local beeperEvents={}
+  local timeDelay = 0;
+  local timeLine = true
+  for line in midiFile:lines() do
+    if timeLine then
+      timeDelay = line
+      timeLine = false
+    else
+      table.insert(beeperEvents,{beeps=serialization.unserialize(line),delay=tonumber(timeDelay)})
+      timeLine = true
+    end
+  end
+  local beeper=component.getPrimary('beep')
+  for _,beepInfo in ipairs(beeperEvents) do
+    beeper.beep(beepInfo.beeps)
+    os.sleep(beepInfo.delay)
+  end
+  return
+end
 
 --set instruments and values we need
 local instruments=0
 local playListArgs={['instrument']=false,['note']=false,['volume']=false,['frequency']=false,['duration']=false}
-if component.isAvailable('iron_noteblock') then
+if options.d then
+  print("Dumping mode selected.")
+  playListArgs={['frequency']=true,['duration']=true}
+  instruments=-1
+elseif component.isAvailable('iron_noteblock') then
   print("Found iron noteblock")
   playListArgs={['instrument']=true,['note']=true,['volume']=true}
   instruments=1
@@ -156,7 +188,7 @@ for i=1,numTracks do
         test=midiFile:read(1):byte()
         eventTime=bit32.lshift(eventTime,7)+bit32.extract(test,0,7)
       until bit32.extract(test,7)==0
-	  
+    
       currentTick=currentTick+eventTime
       eventType=midiFile:read(1)
       if bit32.extract(eventType:byte(),7)==0 then
@@ -252,8 +284,10 @@ end
 print('Notes ready in', os.clock()-currentTime)
 print(string.format("Current free memory is %dk (%d%%) ",computer.freeMemory()/1024, computer.freeMemory()/computer.totalMemory()*100))
 if options.i then return end
-print('Press any key to play.')
-io.read()
+if not options.d then
+  print('Press any key to play.')
+  io.read()
+end
 
 local fireEvents={}
 local numEvents=0
@@ -264,29 +298,42 @@ end
 table.sort(fireEvents)
 fireEvents[numEvents+1]=fireEvents[numEvents]
 
-if instruments==1 then
+if instruments==-1 or options.d then
+  local beeperEvents={}
+  for i=1,numEvents do
+    local beeps={}
+    for _,noteInfo in pairs(fireTicks[fireEvents[i]]) do
+      if tonumber(noteInfo.duration) < 200 then
+        beeps[math.max(math.min(noteInfo.frequency,2000),20)]=tonumber(noteInfo.duration)
+      end
+    end
+    table.insert(beeperEvents,{beeps=beeps,delay=(fireEvents[i+1]-fireEvents[i])*tickLength-0.081*speed}) --0.081 is an emperical constant
+    fireTicks[fireEvents[i]]=nil
+  end
+  if options.d then
+    local dumpFile = io.open(shell.resolve(args[1]):sub(1,shell.resolve(args[1]):len()-4) .. ".mdp",'w')
+    for _,beepInfo in ipairs(beeperEvents) do
+      dumpFile:write(tostring(beepInfo.delay) .. "\n")
+      dumpFile:write(serialization.serialize(beepInfo.beeps)  .. "\n")
+    end
+    dumpFile:flush()
+    dumpFile:close()
+    return
+  else
+    local beeper=component.getPrimary('beep')
+    for _,beepInfo in ipairs(beeperEvents) do
+      beeper.beep(beepInfo.beeps)
+      os.sleep(beepInfo.delay)
+    end
+  end
+  
+elseif instruments==1 then
   local instrument=component.getPrimary('iron_noteblock')
   for i=1,numEvents do
     for _,noteInfo in pairs(fireTicks[fireEvents[i]]) do
       instrument.playNote(noteInfo.instrument,noteInfo.note,noteInfo.volume)
     end
     os.sleep((fireEvents[i+1]-fireEvents[i])*tickLength-0.05)
-  end
-  
-elseif instruments==-1 then
-  local beeperEvents={}
-  for i=1,numEvents do
-    local beeps={}
-    for _,noteInfo in pairs(fireTicks[fireEvents[i]]) do
-	  if tonumber(noteInfo.duration) < 200 then beeps[math.max(math.min(noteInfo.frequency,2000),20)]=tonumber(noteInfo.duration) end
-    end
-	table.insert(beeperEvents,{beeps=beeps,delay=(fireEvents[i+1]-fireEvents[i])*tickLength-0.081*speed}) --0.081 is an emperical constant
-    fireTicks[fireEvents[i]]=nil
-  end
-  local beeper=component.getPrimary('beep')
-  for _,beepInfo in ipairs(beeperEvents) do
-    beeper.beep(beepInfo.beeps)
-    os.sleep(beepInfo.delay)
   end
   
 elseif instruments==0 then
